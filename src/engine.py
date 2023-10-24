@@ -5,17 +5,17 @@ import torch
 import wandb
 from tqdm.auto import tqdm
 from typing import Dict, List, Tuple
-from loss_penalization import sparseloc
+from loss_penalization import sparseloc, sparseloc_filter, calculate_sparsity
 import time
+import numpy as np
 
 def train_step(model: torch.nn.Module, 
                dataloader: torch.utils.data.DataLoader, 
                loss_fn: torch.nn.Module, 
                optimizer: torch.optim.Optimizer,
                device: torch.device,
-               regularization_type,
-               reg_lambda
-               ) -> Tuple[float, float]:
+               regularization_type: str,
+               reg_lambda: int) -> Tuple[float, float]:
   """Trains a PyTorch model for a single epoch.
 
   Turns a target PyTorch model to training mode and then
@@ -57,10 +57,14 @@ def train_step(model: torch.nn.Module,
           reg_term = 0 
       elif regularization_type == "L1":
           # Apply L1 regularization
-          reg_term = torch.sum( torch.abs(model.hidden_layer_1[0].weight))
+          reg_term = torch.sum(torch.abs(model.hidden_layer_1[0].weight))
+          print(model.hidden_layer_1[0].weight.shape)
       elif regularization_type == "sparseloc":
           # Apply Sparse Localized regularization
-          reg_term = sparseloc(model.hidden_layer_1[0].weight)
+          reg_term = sparseloc_filter(model.hidden_layer_1[0].weight)
+      elif regularization_type == "combined":
+          # Apply Sparse Localized regularization
+          reg_term = torch.sum(torch.abs(model.hidden_layer_1[0].weight))/100 + sparseloc(model.hidden_layer_1[0].weight)
       else:
           raise ValueError("Invalid regularization type. Options are 'vanilla', 'L1', 'sparseloc'.")
            
@@ -79,7 +83,9 @@ def train_step(model: torch.nn.Module,
       optimizer.step()
 
       # Calculate and accumulate accuracy metric across all batches
-      y_pred_class = torch.argmax(torch.softmax(y_pred, dim=1), dim=1)
+      y_pred_class = y_pred.argmax(dim=1)
+      # y_pred_class = torch.argmax(y_pred, dim=1)
+      # y_pred_class = torch.argmax(torch.softmax(y_pred, dim=1), dim=1)
       train_acc += (y_pred_class == y).sum().item()/len(y_pred)
 
   # Adjust metrics to get average loss and accuracy per batch 
@@ -136,7 +142,8 @@ def test_step(model: torch.nn.Module,
   # Adjust metrics to get average loss and accuracy per batch 
   test_loss = test_loss / len(dataloader)
   test_acc = test_acc / len(dataloader)
-  return test_loss, test_acc
+  sparsity = calculate_sparsity(model.hidden_layer_1[0].weight)
+  return test_loss, test_acc, sparsity
 
 def train(model: torch.nn.Module, 
           train_dataloader: torch.utils.data.DataLoader, 
@@ -146,7 +153,10 @@ def train(model: torch.nn.Module,
           epochs: int,
           device: torch.device,
           reg_lambda: float,
-          regularization_type: str) -> Dict[str, List]:
+          regularization_type: str,
+          trial_num: int,
+          project_wandb: str,
+          entity_wandb: str) -> Dict[str, List]:
   """Trains and tests a PyTorch model.
 
   Passes a target PyTorch models through train_step() and test_step()
@@ -185,10 +195,9 @@ def train(model: torch.nn.Module,
       "test_acc": []
   }
 
-  run_name = f"{regularization_type}_lambda_{reg_lambda}"
-    
-    # Initialize the wandb run with the given parameters and name
-  wandb.init(project='custom_loss_sparsity', entity='jakubv', name=run_name, tags=[f"{regularization_type}", f"lambda_{reg_lambda}"])
+  run_name = f"{regularization_type}_lambda_{reg_lambda}_trial_{trial_num}"  # <-- Modified
+  
+  wandb.init(project=project_wandb, entity=entity_wandb, name=run_name, tags=[f"{regularization_type}", f"lambda_{reg_lambda}", f"trial_{trial_num}"])
   wandb.watch(model)  
   # Loop through training and testing steps for a number of epochs
   for epoch in tqdm(range(epochs)):
@@ -199,7 +208,7 @@ def train(model: torch.nn.Module,
                                           device=device,
                                           regularization_type = regularization_type,
                                           reg_lambda = reg_lambda)
-      test_loss, test_acc = test_step(model=model,
+      test_loss, test_acc, sparsity = test_step(model=model,
           dataloader=test_dataloader,
           loss_fn=loss_fn,
           device=device)
@@ -210,7 +219,8 @@ def train(model: torch.nn.Module,
           f"train_loss: {train_loss:.4f} | "
           f"train_acc: {train_acc:.4f} | "
           f"test_loss: {test_loss:.4f} | "
-          f"test_acc: {test_acc:.4f}"
+          f"test_acc: {test_acc:.4f} | "
+          f"sparsity: {sparsity:.4f}"
       )
       wandb.log({
         "epoch": epoch+1,
@@ -218,7 +228,8 @@ def train(model: torch.nn.Module,
         "training_loss": train_loss, 
         "train_acc": train_acc,
         "validation_loss": test_loss,
-        "validation_acc": test_acc
+        "validation_acc": test_acc,
+        "sparsity": sparsity
       })  
 
       # Update results dictionary
@@ -231,3 +242,6 @@ def train(model: torch.nn.Module,
   # Return the filled results at the end of the epochs
 
   return results
+
+
+

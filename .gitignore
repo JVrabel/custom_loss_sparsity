@@ -8,3 +8,5 @@ models/
 data/
 wandb/
 outputs/
+TODO.md
+plots.ipynb
